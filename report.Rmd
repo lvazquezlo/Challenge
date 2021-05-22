@@ -1,0 +1,255 @@
+---
+title: "Bitso Challenge"
+author: "Luis Vazquez"
+date: "19/5/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, echo=FALSE, warning=FALSE, include=FALSE}
+
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(tidyverse, janitor, lubridate, here, skimr, scales, knitr, xtable, forecast, patchwork, latex2exp, rugarch)
+
+theme_set(theme_light())
+
+library(tsibble)
+library(xts)
+library(ggplotify)
+library(patchwork)
+
+
+```
+
+### Introduction.
+
+#### For this assignment we are considering the daily open, high, low, close and volume of Bitcoin to US Dollar exchange rate from 1st January 2015 to 31 December 2020, and the daily log returns calculated from close-to-close data. The purpose of this assignment is to analyze the volatility series of daily asset returns.
+
+### Obtain the data from online sources. Disclose the method and source you used for downloading.
+
+In order to obtain the data needed for this assignment, for simplicity we are using Yahoo Finance ([BTC-USD](https://finance.yahoo.com/quote/BTC-USD/)) for downloading the data from 01/01/2015 to 31/12/2020. Once we obtain the data, it's loaded to R.
+
+```{r data, echo=FALSE, warning=FALSE, include=FALSE}
+
+here::here("Data")
+
+btc_usd_raw <- read_csv(file = here::here("Data", "BTC-USD.csv")) %>% 
+  clean_names()
+
+
+
+```
+
+First, we take a look of the first 6 observations of our data. The whole dataset contains 2,192 observations for 7 variables (date, open, high, low, adj_close and volume)
+
+```{r, echo=FALSE, warning=FALSE}
+
+head(btc_usd_raw) %>% 
+  kable()
+
+```
+
+We perform a exploratory data analysis.
+
+Below we can see some summary statistics from the data. Since we are going to analyze and create a model for the log returns of the *close* variable it is created some plot in order to visualize the data.
+
+```{r EDA, echo=FALSE, warning=FALSE}
+
+btc_usd_raw %>% 
+  skimr::skim() %>% 
+  partition()
+
+
+```
+
+```{r g0,echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+btc_usd_raw %>% 
+  na.omit() %>% 
+  ggplot(aes(date, close)) +
+  geom_line(col = "darkgreen", size = 1) +
+  scale_y_continuous(labels = dollar) +
+  labs(title = "Time series for BTC-USD exchange rate",
+       subtitle = "from 01/01/2015 to 31/12/2020",
+       x = "",
+       y = "Px Close",
+       caption = "Source: https://finance.yahoo.com/quote/BTC-USD/")
+
+```
+
+It can be seen that the exchange rate has a upward trend for the observational window.
+
+Then we obtain the daily log returns for the variable *close*.
+
+```{r log rtn, echo=FALSE, warning=FALSE, include=FALSE}
+
+btc_usd <- btc_usd_raw %>% 
+  mutate(log_rtn = log(close/lag(close))) %>% 
+  na.omit()
+
+```
+
+```{r rtn g1, echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+btc_usd %>% 
+  ggplot(aes(date, log_rtn)) +
+  geom_line(col = "darkgreen", size = 1) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Daily returns of BTC/USD",
+       subtitle = "from 01/01/2015 to 31/12/2020",
+       x = "",
+       y = "log(rtn)",
+       caption = "Own realization")
+
+
+```
+
+Also, we obtain the histogram and a QQ-Plot of the log return series.
+
+```{r hist, echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+h1 <- btc_usd %>% 
+  ggplot(aes(x = log_rtn)) +
+  geom_histogram(aes(y = ..density..), colour = "black", fill = "darkgreen", bins = 35) +
+  geom_density(size = 1) +
+  labs(title = "Histogram + Density Plot")
+
+
+h2 <- btc_usd %>% 
+  ggplot(aes(sample = log_rtn)) +
+  stat_qq(col = "darkgreen") +
+  stat_qq_line() +
+  labs(title = "Normal Q-Q Plot")
+
+(h1|h2)
+
+
+```
+
+From the graphs above we can observe that the distribution of the log returns has heavy tails with some extreme values toward the negative returns and from the Q-Q plot we can infer that the returns doesn't follows a normal distribution, it seems like a *t* distribution could fit better.
+
+### Are there any serial correlations in the log return series? Why?
+
+For this question we are plotting the ACF (Auto Correlation Function) of the returns and the PACF (Partial Auto Correlation Function) of the squared returns in order to see if there is any correlations between lags.
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+g1 <- btc_usd %>% 
+  pull(log_rtn) %>% 
+  forecast::ggAcf() +
+  labs(title = "ACF of rtn")
+
+
+g2 <- btc_usd %>% 
+  mutate(log_rtn_2 = log_rtn^2) %>% 
+  pull(log_rtn_2) %>% 
+  forecast::ggPacf() +
+  labs(title = TeX(r'(PACF of $log(rtn^2)$)'))
+
+(g1/g2)
+
+
+```
+
+At a first instance, we can see in the ACF plot that there is autocorrelation in the series, the lags 6, 10, 19 and 33 are the ones that confirm our idea.
+
+### Are there any ARCH effects in the log return series? Why?
+
+Yes, we can see in the PACF plot of the squared returns a clear relationship between the series an the lags, even some lags are statistically significant until the lag 7. This could indicate the presence of an ARCH effect in the serie.
+
+### Fit a Gaussian ARMA-GARCH model to the log return series. Perform model checking, including showing the normal QQ-plot of the standardized residuals. Is the model adequate?
+
+First, we are going to introduce the definitions of the ARMA and the GARCH models to give context to the theory of time series analysis that we are perfoming.
+
+The Autoregressive Moving Average (ARMA) model of order *p,q* is a combination of two linear models, an autoregressive part (AR) and a moving average part (MA). A time series model, ${x_t}$, is an *autoregressive moving average model of order p,q*, ARMA(p,q) if:
+
+$$x_t = \alpha_0 + \alpha_1 x_{t-1} + \alpha_2 x_{t-2} + \dots + \alpha_p x_{t-p} + \epsilon_t + \theta_1 \epsilon_{t-1} + \theta_2 \epsilon_{t-2} +
+\dots + \theta_q \epsilon_{t-q}$$
+
+where ${x_t}$ is white noice, this is ${x_t} \sim N(0, \sigma^2)$.
+
+The Generalised Autoregressive Conditional Heteroskedastic (GARCH) model of order *p,q* in a simple point of view is a model that uses an autoregressive process and a moving average process for the variance itself, in other words, it is a model that accounts for the changes in the variance over time using past values of the variance. Let's define a GARCH(p,q) model.
+
+Suppose a time series $$x_t = \sigma_t w_t$$
+
+where $w_t \sim N(0,1)$ (white noise), and $\sigma_t^2$ is given by:
+
+$$\sigma_t^2 = \alpha_0 + \sum_{i=1}^p  \alpha_ix_{t-i}^2 + \sum_{j = 1}^q  \beta_j \sigma_{t-j}^2$$
+
+Then, we say that ${x_t}$ is a *generalised autoregressive conditional heteroskedastic model of order p,q* denoted by GARCH(p,q).
+
+Once we have already detailed some background of the models, we are going to fit an ARMA(1,1) - GARCH(1,1) model to the log returns of our series. The model is defined as follows:
+
+$$x_t = \alpha_0 +\alpha_1x_{t-1} + \epsilon_t + \theta_1 \epsilon_{t-1} $$ where:
+
+$$\epsilon_t = \sigma_t w_t \space \text{and } \\$$ $$\sigma_t^2 = \gamma_0 + \gamma_1 \epsilon_{t-1}^2 + \beta_1 \sigma_{t-1}^2$$
+
+```{r, echo=FALSE, warning=FALSE}
+
+
+model_data <- xts(x = btc_usd$log_rtn,
+               order.by = btc_usd$date)
+
+  
+spec <- ugarchspec(variance.model = list(model = "sGARCH", 
+                                         garchOrder = c(1, 1), 
+                                         submodel = NULL, 
+                                         external.regressors = NULL, 
+                                         variance.targeting = FALSE), 
+
+                   mean.model     = list(armaOrder = c(1, 1), 
+                                         external.regressors = NULL, 
+                                         distribution.model = "norm", 
+                                         start.pars = list(), 
+                                         fixed.pars = list()))
+
+garch <- ugarchfit(spec = spec, 
+                   data = model_data,
+                   solver.control = list(trace=0))
+
+```
+
+Next, we present the results of the fitted model, the link between the names of this output and our model is as follows:
+
+-   mu = $\alpha_0$
+
+-   ar1 = $\alpha_1$
+
+-   ma1 = $\theta_1$
+
+-   omega = $\gamma_0$
+
+-   alpha1 = $\gamma_1$
+
+-   beta1 = $\beta_1$
+
+```{r, echo=FALSE, warning=FALSE}
+
+garch 
+
+```
+
+In order to validate if the model is adequate we will take a look first to the fit outcome, we can see that all of the parameters are statistically significant at 1%. The AIC and BIC criterias are around a -3.5. Also, we can see that the Ljung-Box test on the standarized residuals ($H_o: \rho = 0$) gives the conclusion that we can't reject the hypotesis of no serial correlation. Then, we can see that the sign bias and the asymmetry signs are not statistically significant.
+
+Secondly, we are performing some visual validations to see if there is any correlations on the lags and if the standardized residuals follows a normal distribution.
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+par(mfrow=c(2,2))
+plot(garch, which = 3)
+plot(garch, which = 9)
+plot(garch, which = 10)
+plot(garch, which = 11)
+
+
+```
+
+From the previous graphs, we can see that the standardized residuals doesn't follows a normal distribution, this may occur because of the presence of extreme values in our series, also we can see that the ACF some lags are statistically significant at a 1%.
+
+Thus, we can conclude that the proposed model isn't adequate.
