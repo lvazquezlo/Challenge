@@ -19,7 +19,6 @@ pacman::p_load(tidyverse, janitor, lubridate, here, skimr, scales, knitr, xtable
 
 theme_set(theme_light())
 
-library(tsibble)
 library(xts)
 library(ggplotify)
 library(patchwork)
@@ -118,7 +117,8 @@ h1 <- btc_usd %>%
   ggplot(aes(x = log_rtn)) +
   geom_histogram(aes(y = ..density..), colour = "black", fill = "darkgreen", bins = 35) +
   geom_density(size = 1) +
-  labs(title = "Histogram + Density Plot")
+  labs(title = "Histogram + Density Plot",
+       x = "log(rtn)")
 
 
 h2 <- btc_usd %>% 
@@ -192,10 +192,12 @@ $$\epsilon_t = \sigma_t w_t \space \text{and } \\$$ $$\sigma_t^2 = \gamma_0 + \g
 
 ```{r, echo=FALSE, warning=FALSE}
 
+# xts object that is requerid to run the ugarchspec function.
 
 model_data <- xts(x = btc_usd$log_rtn,
                order.by = btc_usd$date)
 
+# model specification
   
 spec <- ugarchspec(variance.model = list(model = "sGARCH", 
                                          garchOrder = c(1, 1), 
@@ -208,6 +210,7 @@ spec <- ugarchspec(variance.model = list(model = "sGARCH",
                                          distribution.model = "norm", 
                                          start.pars = list(), 
                                          fixed.pars = list()))
+# model fit
 
 garch <- ugarchfit(spec = spec, 
                    data = model_data,
@@ -235,7 +238,7 @@ garch
 
 ```
 
-In order to validate if the model is adequate we will take a look first to the fit outcome, we can see that all of the parameters are statistically significant at 1%. The AIC and BIC criterias are around a -3.5. Also, we can see that the Ljung-Box test on the standarized residuals ($H_o: \rho = 0$) gives the conclusion that we can't reject the hypotesis of no serial correlation. Then, we can see that the sign bias and the asymmetry signs are not statistically significant.
+In order to validate if the model is adequate we will take a look first to the fit outcome, we can see that all of the parameters are statistically significant at 1%. The AIC and BIC criterias are around a -3.5. Also, we can see that the Ljung-Box test on the standarized residuals ($H_o: \rho = 0$) gives the conclusion that there is serial correlation. Then, we can see that the sign bias and the asymmetry signs are not statistically significant.
 
 Secondly, we are performing some visual validations to see if there is any correlations on the lags and if the standardized residuals follows a normal distribution.
 
@@ -253,3 +256,234 @@ plot(garch, which = 11)
 From the previous graphs, we can see that the standardized residuals doesn't follows a normal distribution, this may occur because of the presence of extreme values in our series, also we can see that the ACF some lags are statistically significant at a 1%.
 
 Thus, we can conclude that the proposed model isn't adequate.
+
+### Build a volatility model of your choice for the log return series. You may create additional features/variables using the data, apply data transformations you consider relevant and you are not limited to any particular model form. Explain the choice of your model and its rationale. Perform model checking, and disclose relevant plots.  Is the model adequate?  Why?
+
+Now, we are going to propose a new model that fits better to the log return series. In the exploratory data analysis we observed some extreme values in the distribution, in order to capture this, we are proposing an ARMA(0,0)-GARCH(1,1) with a *t-student* distribution and creating dummy variables for the extreme values. We are changing the distribution from a *normal* to a *t* to use a distribution with heavier tails.
+
+The process to create the dummy variables is as follows, we are taking observational windows of two years to obtain the highest and the lowest returns from each period and we will classify them as extreme values. After that we create the dummy variables for each date. Our "extreme values" were the following:
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+
+# Function to obtain the lowest and the highest returns from each observational window
+extreme_values <- function(tbl, y1, y2){
+  
+  min_date <- tbl %>% 
+    filter(year(date) %in% c(y1, y2)) %>% 
+    top_n(-1, log_rtn) %>% 
+    pull(date)
+  
+  max_date <- tbl %>% 
+    filter(year(date) %in% c(y1, y2)) %>% 
+    top_n(1, log_rtn) %>% 
+    pull(date)
+  
+  d_dates <- c(min_date, max_date)
+  
+  return(d_dates)
+  
+}
+
+dummy_dates <- c(extreme_values(btc_usd, 2015, 2016), 
+                 extreme_values(btc_usd, 2017, 2018),
+                 extreme_values(btc_usd, 2019, 2020))
+
+dummys <- btc_usd %>% 
+  mutate(d1 = if_else(date == dummy_dates[1], 1, 0),
+         d2 = if_else(date == dummy_dates[2], 1, 0),
+         d3 = if_else(date == dummy_dates[3], 1, 0),
+         d4 = if_else(date == dummy_dates[4], 1, 0),
+         d5 = if_else(date == dummy_dates[5], 1, 0),
+         d6 = if_else(date == dummy_dates[6], 1, 0)
+         ) %>% 
+  select(d1:d6) %>% 
+  as.matrix()
+
+```
+
+```{r, echo=FALSE, warning=FALSE}
+
+btc_usd %>% 
+  filter(date %in% dummy_dates) %>% 
+  kable()
+
+```
+
+The next step is fitting the model using the previous specification.
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+
+# xts object that is requerid to run the ugarchfit function.
+
+model_data <- xts(x = btc_usd$log_rtn,
+               order.by = btc_usd$date)
+
+# model specification
+  
+spec_2 <- ugarchspec(variance.model = list(model = "sGARCH", 
+                                         garchOrder = c(1, 1), 
+                                         submodel = NULL, 
+                                         external.regressors = NULL, 
+                                         variance.targeting = FALSE), 
+
+                   mean.model     = list(armaOrder = c(0, 0), 
+                                         include.mean = FALSE,
+                                         external.regressors = dummys, 
+                                         distribution.model = "norm", 
+                                         start.pars = list(), 
+                                         fixed.pars = list()),
+                   distribution.model = "std")
+# model fit
+
+garch_2 <- ugarchfit(spec = spec_2, 
+                   data = model_data,
+                   solver.control = list(trace=0))
+
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+garch_2
+
+```
+
+
+From the fitted model we can see that all the parameter estimation are statistically significant at a 1%, AIC and BIC criterias are around -4.2. From the Ljung-Box test on the standardized residuals we can conclude that a 1% level there is no serial correlation, this result differs from the previous model (ARMA(1,1)-GARCH(1,1)) and from the Ljung-Box test on standardized squared residuals we can conclude that there is not a presence of an ARCH effect. Then, we can see that the sign bias and the asymmetry signs are not statistically significant these shows us that there is no assymetri problems. 
+
+Next, we create some visual validations to see if there is any correlations on the lags and if the standardized residuals follows a *t-student* distribution.
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center', fig.height=6, fig.width=12}
+
+par(mfrow=c(2,2))
+plot(garch_2, which = 3)
+plot(garch_2, which = 9)
+plot(garch_2, which = 10)
+plot(garch_2, which = 11)
+
+```
+
+From the *std - QQ Plot* we can observe a better result than the previous model, now the sample quantiles aligns better to the theoretical quantiles, this may suggest that the change of the distribution and the inclusion of dummy variables captures the problem of the extreme values. In the ACF plot of the standardized residuals we can see that lags 6 and 10 are statistically significant, in order to check if the residuals are correlated we are performing the Ljung-Box test for the lags 2, 5, 10, 20 and 30, the results were the following:
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+lb2 <- Box.test(garch_2@fit$residuals, lag=2, type="Ljung-Box")
+lb5 <- Box.test(garch_2@fit$residuals, lag=5, type="Ljung-Box")
+lb10 <- Box.test(garch_2@fit$residuals, lag=10, type="Ljung-Box")
+lb20 <- Box.test(garch_2@fit$residuals, lag=20, type="Ljung-Box")
+lb30 <- Box.test(garch_2@fit$residuals, lag=30, type="Ljung-Box")
+
+lj_results <- tibble(
+  Lag = c(2, 5, 10, 20, 30),
+  `X-squared Statistic` = c(lb2$statistic, lb5$statistic, lb10$statistic, lb20$statistic, lb30$statistic),
+  `Degrees Freedom` = c(lb2$parameter, lb5$parameter, lb10$parameter, lb20$parameter, lb30$parameter),
+  `p-value` = c(lb2$p.value, lb5$p.value, lb10$p.value, lb20$p.value, lb30$p.value)
+)
+
+
+lj_results %>% 
+  kable()
+
+```
+
+From the previous table we can see that all p-values conclude that there is no serial correlation in the series. Thus we can conclude that the model is adequate.
+
+
+### Show a time-series plot of the estimated volatility series
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center', fig.height=4, fig.width=12}
+
+estimated_vol <- tibble(
+  date = btc_usd$date,
+  volatility = garch_2@fit$sigma
+)
+
+estimated_vol %>% 
+  ggplot(aes(date, volatility)) +
+  geom_line(col = "darkgreen", size = 0.6) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Time-Series of Estimated Volatility",
+       subtitle = "GARCH(1-1) + t-student",
+       x = "",
+       y = TeX(r'($\sigma$)'))
+
+```
+
+
+### Obtain 1-step to 5-step ahead mean and volatility forecasts using the fitted model.
+
+Since our model is a GARCH(1,1) we are only obtaining the 1 to 5 step ahead volatility forecast, the results were the following.
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+# This new dataset contains the information from 01/01/2015 to 05/01/2021 in order to create the forecast for 1 to 5 steps ahead.
+
+btc_usd_forecast <- read_csv(file = here("Data", "BTC-USD_Forecast.csv")) %>% 
+  clean_names()
+
+btc_usd_forecast <- btc_usd_forecast %>%
+  mutate(log_rtn = log(close/lag(close))) %>% 
+  na.omit()
+
+
+# xts object that is requerid to run the ugarchfit function.
+
+forecast_data <- xts(x = btc_usd_forecast$log_rtn,
+               order.by = btc_usd_forecast$date)
+
+# same model specification from spec_2
+
+# model fit and forecast
+
+garch_2_out <- ugarchfit(spec = spec_2, 
+                   data = forecast_data,
+                   out.sample = 5,
+                   solver.control = list(trace=0))
+
+garch_2_forecast <- ugarchforecast(garch_2_out,
+                                   n.ahead = 5, 
+                                   n.roll = 4)
+
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+garch_2_forecast
+
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center', fig.height=4, fig.width=12}
+
+plot(garch_2_forecast, which = 3)
+
+```
+
+### Compare the model from point 5 with the ARMA-GARCH model from point 4.
+
+```{r}
+
+garch_1_out <- ugarchfit(spec = spec, 
+                   data = forecast_data,
+                   out.sample = 5,
+                   solver.control = list(trace=0))
+
+garch_1_forecast <- ugarchforecast(garch_1_out,
+                                   n.ahead = 5, 
+                                   n.roll = 4)
+
+
+```
+
+```{r}
+
+garch_1_forecast
+plot(garch_1_forecast, which = 1)
+tail(btc_usd_forecast)
+
+```
+
+
+
