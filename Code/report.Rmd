@@ -1,0 +1,13 @@
+---
+title: "Bitso Challenge"
+author: "Luis Vazquez"
+date: "19/5/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
